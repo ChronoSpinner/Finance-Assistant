@@ -9,13 +9,15 @@ def get_api_key(file_path="API_KEYS/Alpha_Vantage"):
 API_KEY = get_api_key()
 BASE_URL = "https://www.alphavantage.co/query"
 
-def get_intraday_stock_data(symbol, interval="5min", outputsize='compact'):
+def get_intraday_stock_data(symbol, interval="5min"):
     parameters = {
         "function": "TIME_SERIES_INTRADAY",
         "symbol": symbol,
         "interval": interval,
-        "outputsize": outputsize,
-        "apikey": API_KEY
+        "outputsize": "full",
+        "apikey": API_KEY,
+        "extended_hours": "true",
+        "datatype": "json"
     }
 
     response = requests.get(BASE_URL, params=parameters)
@@ -40,4 +42,4 @@ if __name__ == "__main__":
     stock_df = get_intraday_stock_data(stock_symbol)
 
     if stock_df is not None:
-        print(stock_df.head())
+        print(stock_df)
