@@ -1,0 +1,35 @@
+# --------------------
+# General files to ignore
+# --------------------
+
+# Operating system generated files
+.DS_Store
+Thumbs.db
+
+# --------------------
+# Python Specific Files
+# --------------------
+
+# Virtual environment folder (CRITICAL for your project)
+venv/
+.venv/
+
+# Byte-code files
+*.pyc
+__pycache__/
+
+# Compiled objects
+*.so
+*.o
+
+# --------------------
+# Data/DL/ML Specific
+# --------------------
+
+# Folders for generated data, logs, or models
+/Datasets/
+/tests/
+/API_KEYS/
+# Large model files
+*.h5
+*.ckpt
