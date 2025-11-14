@@ -14,9 +14,9 @@ def get_intraday_stock_data(symbol, interval="5min"):
         "function": "TIME_SERIES_INTRADAY",
         "symbol": symbol,
         "interval": interval,
-        "outputsize": "full",
+        "outputsize": "compact",
         "apikey": API_KEY,
-        "extended_hours": "true",
+        "extended_hours": "false",
         "datatype": "json"
     }
 
@@ -38,7 +38,7 @@ def get_intraday_stock_data(symbol, interval="5min"):
     return df
 
 if __name__ == "__main__":
-    stock_symbol = "IBM"
+    stock_symbol = "TSLA"
     stock_df = get_intraday_stock_data(stock_symbol)
 
     if stock_df is not None:
