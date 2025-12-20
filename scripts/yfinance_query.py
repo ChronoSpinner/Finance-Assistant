@@ -12,7 +12,7 @@ def get_intraday_stock_data(symbol: str, period: str = "1d", interval: str = "1m
     )
     
     df = data[["Open", "High", "Low", "Close", "Volume"]].copy()
-    
+    # Rename columns for consistency
     df.columns = ["open", "high", "low", "close", "volume"]
     return df
 
