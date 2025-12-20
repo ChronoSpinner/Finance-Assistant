@@ -13,7 +13,8 @@ Thumbs.db
 # Virtual environment folder (CRITICAL for your project)
 venv/
 .venv/
-
+# secret plan
+plan.txt
 # Byte-code files
 *.pyc
 __pycache__/
@@ -27,6 +28,7 @@ __pycache__/
 # --------------------
 
 # Folders for generated data, logs, or models
+/dataset_v1/
 /Datasets/
 /tests/
 /API_KEYS/
