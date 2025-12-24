@@ -3,172 +3,227 @@ import mplfinance as mpf
 import pandas as pd
 import numpy as np
 import os
+import matplotlib
+import matplotlib.pyplot as plt
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
+import warnings
+import gc
+import random
 
-# --- CONFIGURATION ---
-TICKERS = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "GOOGL", "AMZN", "META", "JPM", "BAC"]
-START_DATE = "2020-01-01"
-END_DATE = "2024-01-01"
-LOOKBACK_WINDOW = 30    
-FUTURE_TARGET = 5       
-RETURN_THRESHOLD = 0.015 
-IMG_SIZE = (64, 64)
+# --- SYSTEM CONFIG ---
+warnings.filterwarnings("ignore")
+matplotlib.use('Agg') 
+random.seed(42)
+np.random.seed(42)
 
-# Folders
-DATASET_DIR = "dataset_v1"
-IMG_DIR = os.path.join(DATASET_DIR, "images")
-os.makedirs(IMG_DIR, exist_ok=True)
+# --- TRADING CONFIG ---
+TICKERS = [
+    "NVDA", "AMD", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NFLX",
+    "PLTR", "COIN", "SNOW", "UBER", "ABNB", "CRWD", "PANW", "ROKU", "SHOP", 
+    "PYPL", "ZM", "DOCU", "PTON", "INTC", "MMM", 
+    "JPM", "GS", "BAC", "MS", "V", "MA", "AXP", "BLK", "C",
+    "XOM", "CVX", "CAT", "DE", "LMT", "BA", "GE", "UNP",
+    "COST", "WMT", "TGT", "HD", "MCD", "PEP", "KO", "PG", "LLY", "UNH"
+]
 
-def fetch_data_safe(ticker):
-    """Downloads data for a SINGLE ticker."""
-    print(f"Downloading {ticker}...")
-    try:
-        # Auto_adjust=True fixes the 'FutureWarning' you saw
-        df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False, multi_level_index=False, auto_adjust=True)
-        
-        if df.empty:
-            return None
-            
-        df.columns = [c.capitalize() for c in df.columns]
-        
-        required = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in df.columns for col in required):
-            return None
-            
-        return df.dropna()
-    except Exception as e:
-        print(f"ERROR downloading {ticker}: {e}")
-        return None
+BENCHMARK_TICKER = "SPY"
+START_DATE = "2018-01-01"
+END_DATE = "2025-12-31"
+TRAIN_CUTOFF = "2023-01-01" 
+VAL_CUTOFF = "2024-01-01"      
+LOOKBACK_WINDOW = 64        
+PREDICTION_HORIZON = 10     
+RISK_REWARD_RATIO = 2.0     
+ATR_MULTIPLIER = 1.5        
+NEG_POS_RATIO = 1.2         
+IMG_SIZE = 224              
+DPI = 96
+IMG_DIM_INCH = IMG_SIZE / DPI
+DATA_DIR = "swing_dataset_v8_market_context"
 
-def create_labels(df):
-    """Creates target labels."""
+# --- HELPER FUNCTIONS ---
+
+def calculate_rsi(series, period=14):
+    delta = series.diff(1)
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / (loss + 1e-9) 
+    return 100 - (100 / (1 + rs))
+
+def calculate_indicators(df):
     df = df.copy()
-    
-    # Target: Return from Tomorrow's Open (t+1) to (t+1+5)
-    buy_price = df['Open'].shift(-1) 
-    sell_price = df['Open'].shift(-(1 + FUTURE_TARGET))
-    
-    df['return'] = (sell_price - buy_price) / buy_price
-    
-    conditions = [
-        (df['return'] > RETURN_THRESHOLD), 
-        (df['return'] < -RETURN_THRESHOLD)
-    ]
-    choices = [1, 0]
-    
-    df['label'] = np.select(conditions, choices, default=np.nan)
-    df_clean = df.dropna(subset=['label'])
-    return df_clean
+    prev_close = df['Close'].shift()
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - prev_close)
+    low_close = np.abs(df['Low'] - prev_close)
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    df['ATR'] = true_range.rolling(14).mean()
+    df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+    df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+    df['SMA_20'] = df['Close'].rolling(window=20).mean()
+    df['STD_20'] = df['Close'].rolling(window=20).std()
+    df['Upper_BB'] = df['SMA_20'] + (2 * df['STD_20'])
+    df['Lower_BB'] = df['SMA_20'] - (2 * df['STD_20'])
+    df['RSI'] = calculate_rsi(df['Close'])
+    return df.dropna()
 
-def generate_chart(window_df, filename):
-    """Generates the minimalist Computer Vision chart."""
-    mc = mpf.make_marketcolors(up='g', down='r', volume='in')
-    s  = mpf.make_mpf_style(marketcolors=mc)
-    
-    params = dict(
-        type='candle',
-        style=s,
-        volume=True,
-        axisoff=True,
-        figscale=1.0,
-        savefig=dict(fname=filename, bbox_inches='tight', pad_inches=0)
-    )
-    mpf.plot(window_df, **params, returnfig=True, closefig=True)
+def apply_triple_barrier_atr(df):
+    df = df.copy()
+    future_labels = []
+    closes, highs, lows, atrs, dates = df['Close'].values, df['High'].values, df['Low'].values, df['ATR'].values, df.index
+    for i in range(len(df) - PREDICTION_HORIZON):
+        entry_price, current_atr = closes[i], atrs[i]
+        if np.isnan(current_atr) or current_atr <= 0: continue
+        stop_price = entry_price - (current_atr * ATR_MULTIPLIER)
+        take_profit = entry_price + (current_atr * ATR_MULTIPLIER * RISK_REWARD_RATIO)
+        outcome, max_p = 0, 0.0
+        for f in range(1, PREDICTION_HORIZON + 1):
+            idx = i + f
+            if lows[idx] <= stop_price: break
+            if highs[idx] >= take_profit:
+                outcome = 1
+                break
+            max_p = max(max_p, highs[idx] - entry_price)
+        future_labels.append({'date': dates[i], 'idx': i, 'label': outcome, 'max_profit': max_p})
+    return pd.DataFrame(future_labels)
 
-def main():
-    labeled_data = []
+# --- REFINED NORMALIZATION & CHARTING ---
+
+def normalize_window(df, spy_slice=None):
+    """
+    Fixed Scaling: Anchors both Stock and SPY to 1.0 at start of window.
+    This enables visual Relative Strength analysis.
+    """
+    df = df.copy()
+    ref_price = df['Close'].iloc[0]
+    if ref_price == 0: return df, None
     
-    # --- 1. Fetch Data ---
-    cache_dfs = {} # Save DFs here so we don't download twice
-    
-    for ticker in TICKERS:
-        df = fetch_data_safe(ticker)
-        if df is None: continue
+    # Normalize Stock Prices (First Close = 1.0)
+    cols = ['Open', 'High', 'Low', 'Close', 'EMA_50', 'EMA_200', 'Upper_BB', 'Lower_BB']
+    for col in [c for c in cols if c in df.columns]:
+        df[col] = df[col] / ref_price
+
+    # Normalize SPY to the SAME STARTING ANCHOR (1.0)
+    normalized_spy = None
+    if spy_slice is not None:
+        spy_ref = spy_slice.iloc[0]
+        if spy_ref > 0:
+            normalized_spy = spy_slice / spy_ref
+
+    # Volume Normalization
+    avg_vol = df['Volume'].mean()
+    df['Volume'] = (df['Volume'] / avg_vol).clip(upper=5.0) if avg_vol > 0 else 0
+    return df, normalized_spy
+
+def generate_chart(args):
+    window_df, spy_slice, ticker, date_str, label, split, save_dir = args
+    filepath = os.path.join(save_dir, split, str(label), f"{ticker}_{date_str}_{label}.png")
+    if os.path.exists(filepath): return 0
+
+    try:
+        window_df, normalized_spy = normalize_window(window_df, spy_slice)
+        mc = mpf.make_marketcolors(up='#00FF00', down='#FF0000', edge='inherit', wick='inherit', volume='inherit')
+        s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridstyle='', facecolor='black', edgecolor='black', figcolor='black')
+
+        addplots = []
+        # Thicker lines for 224x224 visibility
+        if 'EMA_50' in window_df.columns:
+            addplots.append(mpf.make_addplot(window_df['EMA_50'], color='orange', width=2.2))
+        if 'EMA_200' in window_df.columns:
+            addplots.append(mpf.make_addplot(window_df['EMA_200'], color='white', width=2.5, linestyle='--'))
+        if 'Upper_BB' in window_df.columns:
+            addplots.append(mpf.make_addplot(window_df[['Upper_BB', 'Lower_BB']], color='cyan', width=1.2, alpha=0.3))
         
-        # Save to cache for later image generation
-        cache_dfs[ticker] = df
+        # Volume Panel
+        addplots.append(mpf.make_addplot(window_df['Volume'], panel=1, type='bar', color='yellow', width=0.8, alpha=0.7))
         
-        if len(df) < LOOKBACK_WINDOW + FUTURE_TARGET:
-            continue
+        # RSI Panel
+        if 'RSI' in window_df.columns:
+             addplots.append(mpf.make_addplot(window_df['RSI'], panel=2, color='magenta', width=2.0, ylim=(0, 100)))
+
+        # SPY OVERLAY - Fixed alpha and scaling
+        if normalized_spy is not None:
+            addplots.append(mpf.make_addplot(normalized_spy, color='#9b59b6', width=2.8, alpha=0.6))
+
+        fig, _ = mpf.plot(window_df, type='candle', style=s, addplot=addplots, volume=False, 
+                          figsize=(IMG_DIM_INCH, IMG_DIM_INCH), panel_ratios=(4, 1, 1), 
+                          axisoff=True, returnfig=True, scale_padding=0, tight_layout=True)
+        
+        fig.savefig(filepath, dpi=DPI, bbox_inches='tight', pad_inches=0, facecolor='black')
+        plt.close(fig)
+        return 1
+    except Exception:
+        plt.close('all')
+        return 0
+
+# --- PIPELINE CLASS ---
+
+class Pipeline:
+    def __init__(self):
+        self.raw_dir = os.path.join(DATA_DIR, "raw_pickle")
+        os.makedirs(self.raw_dir, exist_ok=True)
+        
+    def get_data(self):
+        print("--- 1. Data Ingestion ---")
+        data_store = {}
+        all_tickers = list(set(TICKERS + [BENCHMARK_TICKER]))
+        
+        # Download in one batch for speed
+        raw = yf.download(all_tickers, start=START_DATE, end=END_DATE, group_by='ticker', auto_adjust=True)
+        
+        for t in all_tickers:
+            try:
+                df = raw[t].dropna() if len(all_tickers) > 1 else raw.dropna()
+                if len(df) < 200: continue
+                if t != BENCHMARK_TICKER: df = calculate_indicators(df)
+                df.to_pickle(os.path.join(self.raw_dir, f"{t}.pkl"))
+                data_store[t] = df
+            except: continue
+        return data_store
+
+    def process_metadata(self, data_store):
+        print("\n--- 2. Labeling & Splitting ---")
+        all_tasks, spy_close = [], data_store.get(BENCHMARK_TICKER, pd.DataFrame())['Close']
+        train_cut, val_cut = pd.Timestamp(TRAIN_CUTOFF), pd.Timestamp(VAL_CUTOFF)
+        
+        for ticker, df in tqdm(data_store.items()):
+            if ticker == BENCHMARK_TICKER: continue
+            labeled_df = apply_triple_barrier_atr(df)
             
-        df_labeled = create_labels(df)
-        df_labeled['ticker'] = ticker
-        
-        # IMPORTANT FIX: Save the index (Date) as a column before it gets lost!
-        df_labeled['Date'] = df_labeled.index
-        
-        print(f"  > {ticker}: Found {len(df_labeled)} signals.")
-        labeled_data.append(df_labeled)
-
-    if not labeled_data:
-        print("No valid data found.")
-        return
-
-    full_df = pd.concat(labeled_data)
-    
-    # --- 2. Class Balancing ---
-    buy_df = full_df[full_df['label'] == 1.0]
-    sell_df = full_df[full_df['label'] == 0.0]
-    
-    print(f"\nTotal: {len(buy_df)} Buys, {len(sell_df)} Sells")
-    
-    if len(buy_df) == 0 or len(sell_df) == 0:
-        print("Error: One class has 0 samples.")
-        return
-
-    min_count = min(len(buy_df), len(sell_df))
-    print(f"Balancing to {min_count} samples each...")
-    
-    buy_balanced = buy_df.sample(n=min_count, random_state=42)
-    sell_balanced = sell_df.sample(n=min_count, random_state=42)
-    
-    # We reset index, BUT we now have 'Date' as a column, so it's safe.
-    final_df = pd.concat([buy_balanced, sell_balanced]).sample(frac=1).reset_index(drop=True)
-    
-    # --- 3. Generate Images ---
-    print(f"\nGenerating {len(final_df)} images...")
-    
-    final_metadata = []
-    
-    for i, row in tqdm(final_df.iterrows(), total=len(final_df)):
-        ticker = row['ticker']
-        target_date = row['Date'] # FIX: Access the preserved Date column
-        
-        # Use cached dataframe instead of downloading again
-        if ticker not in cache_dfs: continue
-        original_df = cache_dfs[ticker]
-        
-        try:
-            # Find the location of the date
-            idx = original_df.index.get_loc(target_date)
-        except KeyError:
-            continue
+            # Simple Time Split
+            splits = [
+                ('train', labeled_df[labeled_df['date'] < train_cut]),
+                ('val', labeled_df[(labeled_df['date'] >= train_cut + pd.Timedelta(days=LOOKBACK_WINDOW)) & (labeled_df['date'] < val_cut)]),
+                ('test', labeled_df[labeled_df['date'] >= val_cut + pd.Timedelta(days=LOOKBACK_WINDOW)])
+            ]
             
-        # Slice window
-        start_idx = idx - LOOKBACK_WINDOW + 1
-        if start_idx < 0: continue
-        
-        window = original_df.iloc[start_idx : idx + 1]
-        
-        # Filename
-        label_str = "buy" if row['label'] == 1.0 else "sell"
-        safe_date = str(target_date).split(" ")[0]
-        fname = f"{label_str}_{ticker}_{safe_date}.png"
-        fpath = os.path.join(IMG_DIR, fname)
-        
-        try:
-            generate_chart(window, fpath)
-            final_metadata.append([fname, int(row['label'])])
-        except Exception as e:
-            print(f"Err: {e}")
+            for split_name, subset in splits:
+                if subset.empty: continue
+                pos, neg = subset[subset['label'] == 1], subset[subset['label'] == 0]
+                # Hard Negative Mining
+                n_neg = int(len(pos) * NEG_POS_RATIO)
+                neg_sampled = pd.concat([neg.sort_values('max_profit', ascending=False).iloc[:n_neg//2], 
+                                         neg.sample(min(len(neg), n_neg//2))]) if not pos.empty else neg.iloc[:0]
+                
+                for _, row in pd.concat([pos, neg_sampled]).iterrows():
+                    end_idx = row['idx']
+                    window = df.iloc[end_idx - LOOKBACK_WINDOW + 1 : end_idx + 1]
+                    if len(window) < LOOKBACK_WINDOW: continue
+                    
+                    spy_slice = spy_close.reindex(window.index).ffill().bfill() if not spy_close.empty else None
+                    all_tasks.append((window.copy(), spy_slice, ticker, str(row['date'].date()), row['label'], split_name, DATA_DIR))
+        return all_tasks
 
-    # 4. Save Metadata
-    if len(final_metadata) > 0:
-        meta_df = pd.DataFrame(final_metadata, columns=['filename', 'label'])
-        meta_df.to_csv(os.path.join(DATASET_DIR, "labels.csv"), index=False)
-        print(f"\nSuccess! Generated {len(meta_df)} images.")
-    else:
-        print("\nFailed to generate images.")
+    def run(self):
+        for s in ['train', 'val', 'test']:
+            for l in ['0', '1']: os.makedirs(os.path.join(DATA_DIR, s, l), exist_ok=True)
+        tasks = self.process_metadata(self.get_data())
+        print(f"Generating {len(tasks)} images...")
+        random.shuffle(tasks)
+        with ProcessPoolExecutor(max_workers=max(1, os.cpu_count()-1)) as ex:
+            list(tqdm(ex.map(generate_chart, tasks), total=len(tasks)))
 
 if __name__ == "__main__":
-    main()
+    Pipeline().run()
