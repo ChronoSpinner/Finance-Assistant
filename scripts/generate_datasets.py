@@ -19,12 +19,44 @@ np.random.seed(42)
 
 # --- TRADING CONFIG ---
 TICKERS = [
+    # TECHNOLOGY (Mega Cap & Growth)
     "NVDA", "AMD", "TSLA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NFLX",
-    "PLTR", "COIN", "SNOW", "UBER", "ABNB", "CRWD", "PANW", "ROKU", "SHOP", 
-    "PYPL", "ZM", "DOCU", "PTON", "INTC", "MMM", 
-    "JPM", "GS", "BAC", "MS", "V", "MA", "AXP", "BLK", "C",
-    "XOM", "CVX", "CAT", "DE", "LMT", "BA", "GE", "UNP",
-    "COST", "WMT", "TGT", "HD", "MCD", "PEP", "KO", "PG", "LLY", "UNH"
+    "CRM", "ADBE", "INTC", "CSCO", "ORCL", "QCOM", "TXN", "AVGO", "MU", "LRCX",
+    "AMAT", "IBM", "NOW", "UBER", "ABNB", "PLTR", "SNOW", "PANW", "CRWD", "FTNT",
+    "ZS", "NET", "TEAM", "SHOP", "ZM", "DOCU", "ROKU", "TWLO", "DDOG",
+
+    # FINANCIALS (Banks, Payments, Asset Managers)
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "BLK", "SCHW", "AXP", "V", "MA", "PYPL",
+    "COIN", "HOOD", "KKR", "BX", "USB", "PNC", "TFC", "BK", "STT", "CME", "ICE",
+
+    # CONSUMER DISCRETIONARY (Retail, Auto, Services)
+    "HD", "LOW", "MCD", "SBUX", "NKE", "TGT", "TJX", "COST", "WMT", "DG", "DLTR",
+    "LULU", "CMG", "MAR", "HLT", "BKNG", "EXPE", "RCL", "CCL", "NCLH", "F", "GM",
+    "TM", "HMC", "TSCO", "ORLY", "AZO", "ULTA",
+
+    # HEALTHCARE (Pharma, Biotech, Devices)
+    "LLY", "UNH", "JNJ", "PFE", "MRK", "ABBV", "AMGN", "GILD", "BIIB", "VRTX",
+    "REGN", "ISRG", "SYK", "EW", "BSX", "MDT", "ABT", "TMO", "DHR", "BMY", "CVS",
+    "CI", "HUM", "ELV", "MRNA", "BNTX",
+
+    # ENERGY (Oil, Gas, Solar)
+    "XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "VLO", "HAL",
+    "BKR", "KMI", "WMB", "OKE", "ENPH", "SEDG", "FSLR", "NEE", "DUK", "SO",
+
+    # INDUSTRIALS (Defense, Aerospace, Machinery)
+    "CAT", "DE", "HON", "GE", "MMM", "ETN", "ITW", "EMR", "PH", "CMI", "PCAR",
+    "LMT", "RTX", "BA", "GD", "NOC", "LHX", "HII", "TDG", "TXT",
+    "UPS", "FDX", "UNP", "CSX", "NSC", "DAL", "UAL", "AAL", "LUV",
+
+    # MATERIALS & COMMODITIES (Miners, Chemicals, Steel)
+    "LIN", "APD", "SHW", "ECL", "FCX", "NEM", "SCCO", "AA", "NUE", "STLD",
+    "CLF", "MOS", "CF", "CTRA", "DOW", "DD",
+
+    # COMMUNICATION & ENTERTAINMENT
+    "DIS", "CMCSA", "CHTR", "TMUS", "VZ", "T", "WBD", "LYV",
+
+    # REAL ESTATE (REITs)
+    "PLD", "AMT", "CCI", "EQIX", "DLR", "PSA", "O", "SPG", "VICI", "WELL"
 ]
 
 BENCHMARK_TICKER = "SPY"
@@ -40,7 +72,7 @@ NEG_POS_RATIO = 1.2
 IMG_SIZE = 224              
 DPI = 96
 IMG_DIM_INCH = IMG_SIZE / DPI
-DATA_DIR = "swing_dataset_v8_market_context"
+DATA_DIR = "swing_dataset_v8_market_context_200" 
 
 # --- HELPER FUNCTIONS ---
 
@@ -128,14 +160,23 @@ def generate_chart(args):
         s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridstyle='', facecolor='black', edgecolor='black', figcolor='black')
 
         addplots = []
-        # Thicker lines for 224x224 visibility
+        
+        # --- LAYER 1: BACKGROUND OVERLAYS ---
+        # SPY OVERLAY - Draws BEHIND the candles
+        if normalized_spy is not None:
+            addplots.append(mpf.make_addplot(normalized_spy, color='#9b59b6', width=2.8, alpha=0.6))
+
+        # --- LAYER 2: INDICATORS ---
         if 'EMA_50' in window_df.columns:
             addplots.append(mpf.make_addplot(window_df['EMA_50'], color='orange', width=2.2))
         if 'EMA_200' in window_df.columns:
             addplots.append(mpf.make_addplot(window_df['EMA_200'], color='white', width=2.5, linestyle='--'))
-        if 'Upper_BB' in window_df.columns:
-            addplots.append(mpf.make_addplot(window_df[['Upper_BB', 'Lower_BB']], color='cyan', width=1.2, alpha=0.3))
         
+        # BOLLINGER BANDS - Thicker (1.7) and Opaque (0.8) to fix visibility issues
+        if 'Upper_BB' in window_df.columns:
+            addplots.append(mpf.make_addplot(window_df[['Upper_BB', 'Lower_BB']], color='cyan', width=1.7, alpha=0.8))
+        
+        # --- LAYER 3: PANELS ---
         # Volume Panel
         addplots.append(mpf.make_addplot(window_df['Volume'], panel=1, type='bar', color='yellow', width=0.8, alpha=0.7))
         
@@ -143,15 +184,12 @@ def generate_chart(args):
         if 'RSI' in window_df.columns:
              addplots.append(mpf.make_addplot(window_df['RSI'], panel=2, color='magenta', width=2.0, ylim=(0, 100)))
 
-        # SPY OVERLAY - Fixed alpha and scaling
-        if normalized_spy is not None:
-            addplots.append(mpf.make_addplot(normalized_spy, color='#9b59b6', width=2.8, alpha=0.6))
-
+        # --- PLOTTING ---
         fig, _ = mpf.plot(window_df, type='candle', style=s, addplot=addplots, volume=False, 
                           figsize=(IMG_DIM_INCH, IMG_DIM_INCH), panel_ratios=(4, 1, 1), 
-                          axisoff=True, returnfig=True, scale_padding=0, tight_layout=True)
+                          axisoff=True, returnfig=True, scale_padding=0.05, tight_layout=True)
         
-        fig.savefig(filepath, dpi=DPI, bbox_inches='tight', pad_inches=0, facecolor='black')
+        fig.savefig(filepath, dpi=DPI, bbox_inches='tight', pad_inches=0.05, facecolor='black')
         plt.close(fig)
         return 1
     except Exception:
