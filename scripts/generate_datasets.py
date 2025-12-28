@@ -63,16 +63,15 @@ BENCHMARK_TICKER = "SPY"
 START_DATE = "2018-01-01"
 END_DATE = "2025-12-31"
 TRAIN_CUTOFF = "2023-01-01" 
-VAL_CUTOFF = "2024-01-01"      
+VAL_CUTOFF = "2024-01-01"       
 LOOKBACK_WINDOW = 64        
 PREDICTION_HORIZON = 10     
 RISK_REWARD_RATIO = 2.0     
 ATR_MULTIPLIER = 1.5        
-NEG_POS_RATIO = 1.2         
 IMG_SIZE = 224              
 DPI = 96
 IMG_DIM_INCH = IMG_SIZE / DPI
-DATA_DIR = "swing_dataset_v8_market_context_200" 
+DATA_DIR = "swing_dataset_3class_exact224" 
 
 # --- HELPER FUNCTIONS ---
 
@@ -101,33 +100,49 @@ def calculate_indicators(df):
     df['RSI'] = calculate_rsi(df['Close'])
     return df.dropna()
 
-def apply_triple_barrier_atr(df):
+def apply_triple_barrier_3class(df):
+    """
+    Applies 3-Class Labeling:
+    0 = SELL (Hit Stop Loss first)
+    1 = HOLD (Hit neither / Time limit)
+    2 = BUY  (Hit Take Profit first)
+    """
     df = df.copy()
     future_labels = []
     closes, highs, lows, atrs, dates = df['Close'].values, df['High'].values, df['Low'].values, df['ATR'].values, df.index
+    
     for i in range(len(df) - PREDICTION_HORIZON):
-        entry_price, current_atr = closes[i], atrs[i]
+        entry_price = closes[i]
+        current_atr = atrs[i]
+        
         if np.isnan(current_atr) or current_atr <= 0: continue
-        stop_price = entry_price - (current_atr * ATR_MULTIPLIER)
+        
+        # Define Barriers
+        stop_loss = entry_price - (current_atr * ATR_MULTIPLIER)
         take_profit = entry_price + (current_atr * ATR_MULTIPLIER * RISK_REWARD_RATIO)
-        outcome, max_p = 0, 0.0
+        
+        outcome = 1 # Default to HOLD
+        
         for f in range(1, PREDICTION_HORIZON + 1):
             idx = i + f
-            if lows[idx] <= stop_price: break
-            if highs[idx] >= take_profit:
-                outcome = 1
+            
+            # Check Stop Loss (SELL Signal - 0)
+            if lows[idx] <= stop_loss:
+                outcome = 0
                 break
-            max_p = max(max_p, highs[idx] - entry_price)
-        future_labels.append({'date': dates[i], 'idx': i, 'label': outcome, 'max_profit': max_p})
+            
+            # Check Take Profit (BUY Signal - 2)
+            if highs[idx] >= take_profit:
+                outcome = 2
+                break
+        
+        future_labels.append({'date': dates[i], 'idx': i, 'label': outcome})
+        
     return pd.DataFrame(future_labels)
 
 # --- REFINED NORMALIZATION & CHARTING ---
 
 def normalize_window(df, spy_slice=None):
-    """
-    Fixed Scaling: Anchors both Stock and SPY to 1.0 at start of window.
-    This enables visual Relative Strength analysis.
-    """
     df = df.copy()
     ref_price = df['Close'].iloc[0]
     if ref_price == 0: return df, None
@@ -137,7 +152,7 @@ def normalize_window(df, spy_slice=None):
     for col in [c for c in cols if c in df.columns]:
         df[col] = df[col] / ref_price
 
-    # Normalize SPY to the SAME STARTING ANCHOR (1.0)
+    # Normalize SPY
     normalized_spy = None
     if spy_slice is not None:
         spy_ref = spy_slice.iloc[0]
@@ -161,35 +176,36 @@ def generate_chart(args):
 
         addplots = []
         
-        # --- LAYER 1: BACKGROUND OVERLAYS ---
-        # SPY OVERLAY - Draws BEHIND the candles
+        # LAYER 1: SPY
         if normalized_spy is not None:
             addplots.append(mpf.make_addplot(normalized_spy, color='#9b59b6', width=2.8, alpha=0.6))
 
-        # --- LAYER 2: INDICATORS ---
+        # LAYER 2: INDICATORS
         if 'EMA_50' in window_df.columns:
             addplots.append(mpf.make_addplot(window_df['EMA_50'], color='orange', width=2.2))
         if 'EMA_200' in window_df.columns:
             addplots.append(mpf.make_addplot(window_df['EMA_200'], color='white', width=2.5, linestyle='--'))
-        
-        # BOLLINGER BANDS - Thicker (1.7) and Opaque (0.8) to fix visibility issues
         if 'Upper_BB' in window_df.columns:
             addplots.append(mpf.make_addplot(window_df[['Upper_BB', 'Lower_BB']], color='cyan', width=1.7, alpha=0.8))
         
-        # --- LAYER 3: PANELS ---
-        # Volume Panel
+        # LAYER 3: PANELS
         addplots.append(mpf.make_addplot(window_df['Volume'], panel=1, type='bar', color='yellow', width=0.8, alpha=0.7))
-        
-        # RSI Panel
         if 'RSI' in window_df.columns:
              addplots.append(mpf.make_addplot(window_df['RSI'], panel=2, color='magenta', width=2.0, ylim=(0, 100)))
 
-        # --- PLOTTING ---
+        # PLOTTING
+        # Note: We use tight_layout=False here because we will manually adjust subplots to fill 100%
         fig, _ = mpf.plot(window_df, type='candle', style=s, addplot=addplots, volume=False, 
                           figsize=(IMG_DIM_INCH, IMG_DIM_INCH), panel_ratios=(4, 1, 1), 
-                          axisoff=True, returnfig=True, scale_padding=0.05, tight_layout=True)
+                          axisoff=True, returnfig=True, scale_padding=0.02, tight_layout=False)
         
-        fig.savefig(filepath, dpi=DPI, bbox_inches='tight', pad_inches=0.05, facecolor='black')
+        # FORCE EXACT DIMENSIONS
+        # This removes all margins and forces the plot to fill the exact figure size
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+        
+        # Save without bbox_inches='tight' and with 0 padding to keep strict pixels
+        fig.savefig(filepath, dpi=DPI, bbox_inches=None, pad_inches=0, facecolor='black')
+        
         plt.close(fig)
         return 1
     except Exception:
@@ -208,7 +224,6 @@ class Pipeline:
         data_store = {}
         all_tickers = list(set(TICKERS + [BENCHMARK_TICKER]))
         
-        # Download in one batch for speed
         raw = yf.download(all_tickers, start=START_DATE, end=END_DATE, group_by='ticker', auto_adjust=True)
         
         for t in all_tickers:
@@ -222,15 +237,16 @@ class Pipeline:
         return data_store
 
     def process_metadata(self, data_store):
-        print("\n--- 2. Labeling & Splitting ---")
+        print("\n--- 2. Labeling & 3-Class Balancing ---")
         all_tasks, spy_close = [], data_store.get(BENCHMARK_TICKER, pd.DataFrame())['Close']
         train_cut, val_cut = pd.Timestamp(TRAIN_CUTOFF), pd.Timestamp(VAL_CUTOFF)
         
         for ticker, df in tqdm(data_store.items()):
             if ticker == BENCHMARK_TICKER: continue
-            labeled_df = apply_triple_barrier_atr(df)
             
-            # Simple Time Split
+            # Apply 3-Class Labeling
+            labeled_df = apply_triple_barrier_3class(df)
+            
             splits = [
                 ('train', labeled_df[labeled_df['date'] < train_cut]),
                 ('val', labeled_df[(labeled_df['date'] >= train_cut + pd.Timedelta(days=LOOKBACK_WINDOW)) & (labeled_df['date'] < val_cut)]),
@@ -239,27 +255,44 @@ class Pipeline:
             
             for split_name, subset in splits:
                 if subset.empty: continue
-                pos, neg = subset[subset['label'] == 1], subset[subset['label'] == 0]
-                # Hard Negative Mining
-                n_neg = int(len(pos) * NEG_POS_RATIO)
-                neg_sampled = pd.concat([neg.sort_values('max_profit', ascending=False).iloc[:n_neg//2], 
-                                         neg.sample(min(len(neg), n_neg//2))]) if not pos.empty else neg.iloc[:0]
                 
-                for _, row in pd.concat([pos, neg_sampled]).iterrows():
+                # SEPARATE CLASSES
+                sells = subset[subset['label'] == 0] # Sell
+                holds = subset[subset['label'] == 1] # Hold (Majority)
+                buys  = subset[subset['label'] == 2] # Buy
+                
+                # --- BALANCING STRATEGY (1:1:1 APPROX) ---
+                target_count = max(len(sells), len(buys))
+                if target_count < 10: target_count = 50 
+                
+                if len(holds) > target_count:
+                    holds_sampled = holds.sample(n=target_count, random_state=42)
+                else:
+                    holds_sampled = holds
+
+                balanced_subset = pd.concat([sells, holds_sampled, buys])
+                
+                # Create Tasks
+                for _, row in balanced_subset.iterrows():
                     end_idx = row['idx']
                     window = df.iloc[end_idx - LOOKBACK_WINDOW + 1 : end_idx + 1]
                     if len(window) < LOOKBACK_WINDOW: continue
                     
                     spy_slice = spy_close.reindex(window.index).ffill().bfill() if not spy_close.empty else None
-                    all_tasks.append((window.copy(), spy_slice, ticker, str(row['date'].date()), row['label'], split_name, DATA_DIR))
+                    all_tasks.append((window.copy(), spy_slice, ticker, str(row['date'].date()), int(row['label']), split_name, DATA_DIR))
+                    
         return all_tasks
 
     def run(self):
+        # Create directories for 3 classes: 0 (Sell), 1 (Hold), 2 (Buy)
         for s in ['train', 'val', 'test']:
-            for l in ['0', '1']: os.makedirs(os.path.join(DATA_DIR, s, l), exist_ok=True)
+            for l in ['0', '1', '2']: 
+                os.makedirs(os.path.join(DATA_DIR, s, l), exist_ok=True)
+                
         tasks = self.process_metadata(self.get_data())
-        print(f"Generating {len(tasks)} images...")
+        print(f"Generating {len(tasks)} images (3-Class Balanced, Exact 224x224)...")
         random.shuffle(tasks)
+        
         with ProcessPoolExecutor(max_workers=max(1, os.cpu_count()-1)) as ex:
             list(tqdm(ex.map(generate_chart, tasks), total=len(tasks)))
 
